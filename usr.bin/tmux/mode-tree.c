@@ -1,4 +1,4 @@
-/* $OpenBSD: mode-tree.c,v 1.55 2021/08/20 17:50:42 nicm Exp $ */
+/* $OpenBSD: mode-tree.c,v 1.59 2021/10/26 12:22:23 nicm Exp $ */
 
 /*
  * Copyright (c) 2017 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -716,14 +716,14 @@ mode_tree_draw(struct mode_tree_data *mtd)
 			screen_write_nputs(&ctx, w, &gc0, "%s", text);
 			if (mti->text != NULL) {
 				format_draw(&ctx, &gc0, w - width, mti->text,
-				    NULL);
+				    NULL, 0);
 			}
 		} else {
 			screen_write_clearendofline(&ctx, gc.bg);
 			screen_write_nputs(&ctx, w, &gc, "%s", text);
 			if (mti->text != NULL) {
 				format_draw(&ctx, &gc, w - width, mti->text,
-				    NULL);
+				    NULL, 0);
 			}
 		}
 		free(text);
@@ -747,7 +747,7 @@ mode_tree_draw(struct mode_tree_data *mtd)
 		mti = mti->parent;
 
 	screen_write_cursormove(&ctx, 0, h, 0);
-	screen_write_box(&ctx, w, sy - h);
+	screen_write_box(&ctx, w, sy - h, BOX_LINES_DEFAULT, NULL, NULL);
 
 	if (mtd->sort_list != NULL) {
 		xasprintf(&text, " %s (sort: %s%s)", mti->name,

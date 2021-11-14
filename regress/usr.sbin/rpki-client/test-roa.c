@@ -1,4 +1,4 @@
-/*	$Id: test-roa.c,v 1.11 2021/05/06 17:03:57 job Exp $ */
+/*	$Id: test-roa.c,v 1.14 2021/10/26 16:59:54 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -30,37 +30,7 @@
 
 #include "extern.h"
 
-#include "test-common.c"
-
-#ifndef ASN1error
-void
-ASN1error(int err)
-{
-	ASN1err(0, err);
-}
-#endif
-
 int verbose;
-
-static void
-roa_print(const struct roa *p)
-{
-	char	 buf[128];
-	size_t	 i;
-
-	assert(p != NULL);
-
-	printf("Subject key identifier: %s\n", pretty_key_id(p->ski));
-	printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
-	printf("Authority info access: %s\n", p->aia);
-	printf("asID: %" PRIu32 "\n", p->asid);
-	for (i = 0; i < p->ipsz; i++) {
-		ip_addr_print(&p->ips[i].addr,
-			p->ips[i].afi, buf, sizeof(buf));
-		printf("%5zu: %s (max: %zu)\n", i + 1,
-			buf, p->ips[i].maxlength);
-	}
-}
 
 int
 main(int argc, char *argv[])
@@ -69,7 +39,8 @@ main(int argc, char *argv[])
 	BIO		*bio_out = NULL;
 	X509		*xp = NULL;
 	struct roa	*p;
-
+	unsigned char	*buf;
+	size_t		 len;
 
 	ERR_load_crypto_strings();
 	OpenSSL_add_all_ciphers();
@@ -98,8 +69,11 @@ main(int argc, char *argv[])
 		errx(1, "argument missing");
 
 	for (i = 0; i < argc; i++) {
-		if ((p = roa_parse(&xp, argv[i])) == NULL)
-			break;
+		buf = load_file(argv[i], &len);
+		if ((p = roa_parse(&xp, argv[i], buf, len)) == NULL) {
+			free(buf);
+			continue;
+		}
 		if (verb)
 			roa_print(p);
 		if (ppem) {
@@ -107,6 +81,7 @@ main(int argc, char *argv[])
 				errx(1,
 				    "PEM_write_bio_X509: unable to write cert");
 		}
+		free(buf);
 		roa_free(p);
 		X509_free(xp);
 	}

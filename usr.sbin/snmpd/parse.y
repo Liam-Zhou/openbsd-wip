@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.68 2021/09/02 05:41:02 martijn Exp $	*/
+/*	$OpenBSD: parse.y,v 1.72 2021/10/25 11:21:32 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -33,7 +33,6 @@
 #include <net/if.h>
 
 #include <arpa/inet.h>
-#include <arpa/nameser.h>
 
 #include <openssl/sha.h>
 
@@ -351,6 +350,7 @@ listen_udptcp	: listenproto STRING port listenflags	{
 			free($2);
 			free($3);
 		}
+		;
 
 port		: /* empty */			{
 			$$ = NULL;
@@ -821,7 +821,7 @@ hostdef		: STRING hostoid hostauth srcaddr	{
 			}
 			tr->ta_oid = $2;
 			tr->ta_version = $3.type;
-			if ($3.type == ADDRESS_FLAG_SNMPV2) {
+			if ($3.type == SNMP_V2) {
 				(void)strlcpy(tr->ta_community, $3.data,
 				    sizeof(tr->ta_community));
 				free($3.data);
@@ -1167,8 +1167,8 @@ findeol(void)
 int
 yylex(void)
 {
-	u_char	 buf[8096];
-	u_char	*p, *val;
+	char	 buf[8096];
+	char	*p, *val;
 	int	 quotec, next, c;
 	int	 token;
 
@@ -1206,7 +1206,7 @@ top:
 		p = val + strlen(val) - 1;
 		lungetc(DONE_EXPAND);
 		while (p >= val) {
-			lungetc(*p);
+			lungetc((unsigned char)*p);
 			p--;
 		}
 		lungetc(START_EXPAND);
@@ -1282,8 +1282,8 @@ top:
 		} else {
 nodigits:
 			while (p > buf + 1)
-				lungetc(*--p);
-			c = *--p;
+				lungetc((unsigned char)*--p);
+			c = (unsigned char)*--p;
 			if (c == '-')
 				return (c);
 		}

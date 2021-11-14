@@ -1,4 +1,4 @@
-/*	$OpenBSD: btrace.c,v 1.57 2021/09/21 21:33:35 bluhm Exp $ */
+/*	$OpenBSD: btrace.c,v 1.60 2021/11/12 16:57:24 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 - 2021 Martin Pieuchot <mpi@openbsd.org>
@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <paths.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -82,6 +83,7 @@ void			 rule_printmaps(struct bt_rule *);
 uint64_t		 builtin_nsecs(struct dt_evt *);
 const char		*builtin_kstack(struct dt_evt *);
 const char		*builtin_arg(struct dt_evt *, enum bt_argtype);
+struct bt_arg		*fn_str(struct bt_arg *, struct dt_evt *, char *);
 void			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
@@ -138,11 +140,6 @@ main(int argc, char *argv[])
 
 	setlocale(LC_ALL, "");
 
-#if notyet
-	if (pledge("stdio rpath", NULL) == -1)
-		err(1, "pledge");
-#endif
-
 	while ((ch = getopt(argc, argv, "e:lnp:v")) != -1) {
 		switch (ch) {
 		case 'e':
@@ -166,8 +163,22 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc > 0 && btscript == NULL) {
+	if (argc > 0 && btscript == NULL)
 		filename = argv[0];
+
+	 /* Cannot pledge due to special ioctl()s */
+	if (unveil(__PATH_DEVDT, "r") == -1)
+		err(1, "unveil %s", __PATH_DEVDT);
+	if (unveil(_PATH_KSYMS, "r") == -1)
+		err(1, "unveil %s", _PATH_KSYMS);
+	if (filename != NULL) {
+		if (unveil(filename, "r") == -1)
+			err(1, "unveil %s", filename);
+	}
+	if (unveil(NULL, NULL) == -1)
+		err(1, "unveil");
+
+	if (filename != NULL) {
 		btscript = read_btfile(filename, &btslen);
 		argc--;
 		argv++;
@@ -245,6 +256,18 @@ read_btfile(const char *filename, size_t *len)
 	return fcontent;
 }
 
+static int
+dtpi_cmp(const void *a, const void *b)
+{
+	const struct dtioc_probe_info *ai = a, *bi = b;
+
+	if (ai->dtpi_pbn > bi->dtpi_pbn)
+		return 1;
+	if (ai->dtpi_pbn < bi->dtpi_pbn)
+		return -1;
+	return 0;
+}
+
 void
 dtpi_cache(int fd)
 {
@@ -265,6 +288,8 @@ dtpi_cache(int fd)
 	dtpr.dtpr_probes = dt_dtpis;
 	if (ioctl(fd, DTIOCGPLIST, &dtpr))
 		err(1, "DTIOCGPLIST");
+
+	qsort(dt_dtpis, dt_ndtpi, sizeof(*dt_dtpis), dtpi_cmp);
 }
 
 void
@@ -338,6 +363,15 @@ dtpi_get_by_value(const char *prov, const char *func, const char *name)
 	}
 
 	return NULL;
+}
+
+static struct dtioc_probe_info *
+dtpi_get_by_id(unsigned int pbn)
+{
+	struct dtioc_probe_info d;
+
+	d.dtpi_pbn = pbn;
+	return bsearch(&d, dt_dtpis, dt_ndtpi, sizeof(*dt_dtpis), dtpi_cmp);
 }
 
 void
@@ -915,11 +949,47 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_value = ba_new(ba2long(ba, dtev), B_AT_LONG);
 		bv->bv_type = B_VT_LONG;
 		break;
+	case B_AT_FN_STR:
+		bv->bv_value = ba_new(ba2str(ba, dtev), B_AT_STR);
+		bv->bv_type = B_VT_STR;
+		break;
 	default:
 		xabort("store not implemented for type %d", ba->ba_type);
 	}
 
 	debug("bv=%p var '%s' store (%p)\n", bv, bv_name(bv), bv->bv_value);
+}
+
+/*
+ * String conversion	{ str($1); string($1, 3); }
+ *
+ * Since fn_str is currently only called in ba2str, *buf should be a pointer
+ * to the static buffer provided by ba2str.
+ */
+struct bt_arg *
+fn_str(struct bt_arg *ba, struct dt_evt *dtev, char *buf)
+{
+	struct bt_arg *arg, *index;
+	ssize_t len = STRLEN;
+
+	assert(ba->ba_type == B_AT_FN_STR);
+
+	arg = (struct bt_arg*)ba->ba_value;
+	assert(arg != NULL);
+
+	index = SLIST_NEXT(arg, ba_next);
+	if (index != NULL) {
+		/* Should have only 1 optional argument. */
+		assert(SLIST_NEXT(index, ba_next) == NULL);
+		len = MINIMUM(ba2long(index, dtev) + 1, STRLEN);
+	}
+
+	/* All negative lengths behave the same as a zero length. */
+	if (len < 1)
+		return ba_new("", B_AT_STR);
+
+	strlcpy(buf, ba2str(arg, dtev), len);
+	return ba_new(buf, B_AT_STR);
 }
 
 /*
@@ -1216,6 +1286,10 @@ ba_name(struct bt_arg *ba)
 		return "args";
 	case B_AT_BI_RETVAL:
 		return "retval";
+	case B_AT_BI_PROBE:
+		return "probe";
+	case B_AT_FN_STR:
+		return "str";
 	case B_AT_OP_PLUS:
 		return "+";
 	case B_AT_OP_MINUS:
@@ -1323,6 +1397,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_RETVAL:
 		val = dtev->dtev_retval[0];
 		break;
+	case B_AT_BI_PROBE:
+		val = dtev->dtev_pbn;
+		break;
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		val = baexpr2long(ba, dtev);
 		break;
@@ -1339,8 +1416,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 const char *
 ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 {
-	static char buf[sizeof("18446744073709551615")]; /* UINT64_MAX */
+	static char buf[STRLEN];
 	struct bt_var *bv;
+	struct dtioc_probe_info *dtpi;
 	const char *str;
 
 	buf[0] = '\0';
@@ -1387,6 +1465,15 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		snprintf(buf, sizeof(buf), "%ld", (long)dtev->dtev_retval[0]);
 		str = buf;
 		break;
+	case B_AT_BI_PROBE:
+		dtpi = dtpi_get_by_id(dtev->dtev_pbn);
+		if (dtpi != NULL)
+			snprintf(buf, sizeof(buf), "%s:%s:%s",
+			    dtpi->dtpi_prov, dtpi_func(dtpi), dtpi->dtpi_name);
+		else
+			snprintf(buf, sizeof(buf), "%u", dtev->dtev_pbn);
+		str = buf;
+		break;
 	case B_AT_MAP:
 		bv = ba->ba_value;
 		/* Unitialized map */
@@ -1399,6 +1486,9 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_VAR:
 		str = ba2str(ba_read(ba), dtev);
+		break;
+	case B_AT_FN_STR:
+		str = (const char*)(fn_str(ba, dtev, buf))->ba_value;
 		break;
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
@@ -1458,11 +1548,13 @@ ba2dtflags(struct bt_arg *ba)
 			flags |= DTEVT_FUNCARGS;
 			break;
 		case B_AT_BI_RETVAL:
+		case B_AT_BI_PROBE:
 			break;
 		case B_AT_MF_COUNT:
 		case B_AT_MF_MAX:
 		case B_AT_MF_MIN:
 		case B_AT_MF_SUM:
+		case B_AT_FN_STR:
 		case B_AT_OP_PLUS ... B_AT_OP_LOR:
 			break;
 		default:

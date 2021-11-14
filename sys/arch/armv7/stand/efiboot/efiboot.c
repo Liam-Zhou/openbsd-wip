@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.34 2021/06/07 21:18:31 krw Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.37 2021/10/26 14:10:02 patrick Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -435,6 +435,28 @@ efi_framebuffer(void)
 	    sizeof(framebuffer_path));
 }
 
+uint64_t dma_constraint[2] = { 0, -1 };
+
+void
+efi_dma_constraint(void)
+{
+	void *node;
+
+	/* Raspberry Pi 4 is "special". */
+	node = fdt_find_node("/");
+	if (fdt_node_is_compatible(node, "brcm,bcm2711"))
+		dma_constraint[1] = htobe64(0x3bffffff);
+
+	/* Not all bus masters can access 0x0-0x7ffff on Zynq-7000. */
+	if (fdt_node_is_compatible(node, "xlnx,zynq-7000"))
+		dma_constraint[0] = htobe64(0x00080000);
+
+	/* Pass DMA constraint. */
+	node = fdt_find_node("/chosen");
+	fdt_node_add_property(node, "openbsd,dma-constraint",
+	    dma_constraint, sizeof(dma_constraint));
+}
+
 void
 efi_console(void)
 {
@@ -465,6 +487,7 @@ efi_makebootargs(char *bootargs, int howto)
 	u_char zero[8] = { 0 };
 	uint64_t uefi_system_table = htobe64((uintptr_t)ST);
 	uint32_t boothowto = htobe32(howto);
+	EFI_PHYSICAL_ADDRESS addr;
 	void *node;
 	size_t len;
 	int i;
@@ -475,6 +498,16 @@ efi_makebootargs(char *bootargs, int howto)
 			    &ST->ConfigurationTable[i].VendorGuid) == 0)
 				fdt = ST->ConfigurationTable[i].VendorTable;
 		}
+	}
+
+	if (!fdt_get_size(fdt))
+		return NULL;
+
+	len = roundup(fdt_get_size(fdt) + PAGE_SIZE, PAGE_SIZE);
+	if (BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(len), &addr) == EFI_SUCCESS) {
+		memcpy((void *)addr, fdt, fdt_get_size(fdt));
+		fdt = (void *)addr;
 	}
 
 	if (!fdt_init(fdt))
@@ -515,6 +548,7 @@ efi_makebootargs(char *bootargs, int howto)
 
 	efi_framebuffer();
 	efi_console();
+	efi_dma_constraint();
 
 	fdt_finalize();
 
@@ -905,8 +939,6 @@ Xdtb_efi(void)
 	char path[MAXPATHLEN];
 	struct stat sb;
 	int fd;
-
-#define O_RDONLY	0
 
 	if (cmd.argc != 2)
 		return (1);

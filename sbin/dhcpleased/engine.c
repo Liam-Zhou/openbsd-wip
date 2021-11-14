@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.27 2021/09/15 15:18:23 florian Exp $	*/
+/*	$OpenBSD: engine.c,v 1.29 2021/11/14 18:13:19 florian Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -830,13 +830,6 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 		    ntohs(udp->uh_sport), hbuf_dst, ntohs(udp->uh_dport));
 	}
 
-	if (ntohs(udp->uh_sport) != SERVER_PORT ||
-	    ntohs(udp->uh_dport) != CLIENT_PORT) {
-		log_warnx("%s: invalid ports used %s:%d -> %s:%d", __func__,
-		    hbuf_src, ntohs(udp->uh_sport),
-		    hbuf_dst, ntohs(udp->uh_dport));
-		return;
-	}
 	if (rem < sizeof(*dhcp_hdr))
 		goto too_short;
 
@@ -1401,7 +1394,7 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 		if (old_state == IF_RENEWING) {
 			iface->dhcp_server.s_addr = INADDR_ANY;
 			iface->timo.tv_sec = (iface->lease_time -
-			    iface->renewal_time) / 2; /* RFC 2131 4.4.5 */
+			    iface->rebinding_time) / 2; /* RFC 2131 4.4.5 */
 		} else
 			iface->timo.tv_sec /= 2;
 		request_dhcp_request(iface);

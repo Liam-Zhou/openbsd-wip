@@ -1,4 +1,4 @@
-/* $OpenBSD: screen.c,v 1.75 2021/09/09 06:57:48 nicm Exp $ */
+/* $OpenBSD: screen.c,v 1.78 2021/11/03 13:37:17 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -82,7 +82,10 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 	s->path = NULL;
 
 	s->cstyle = SCREEN_CURSOR_DEFAULT;
-	s->ccolour = xstrdup("");
+	s->default_cstyle = SCREEN_CURSOR_DEFAULT;
+	s->default_mode = 0;
+	s->ccolour = -1;
+	s->default_ccolour = -1;
 	s->tabs = NULL;
 	s->sel = NULL;
 
@@ -126,7 +129,6 @@ screen_free(struct screen *s)
 	free(s->tabs);
 	free(s->path);
 	free(s->title);
-	free(s->ccolour);
 
 	if (s->write_list != NULL)
 		screen_write_free_list(s);
@@ -152,48 +154,47 @@ screen_reset_tabs(struct screen *s)
 		bit_set(s->tabs, i);
 }
 
-/* Set screen cursor style. */
+/* Set screen cursor style and mode. */
 void
-screen_set_cursor_style(struct screen *s, u_int style)
+screen_set_cursor_style(u_int style, enum screen_cursor_style *cstyle,
+    int *mode)
 {
-	log_debug("%s: new %u, was %u", __func__, style, s->cstyle);
 	switch (style) {
 	case 0:
-		s->cstyle = SCREEN_CURSOR_DEFAULT;
+		*cstyle = SCREEN_CURSOR_DEFAULT;
 		break;
 	case 1:
-		s->cstyle = SCREEN_CURSOR_BLOCK;
-		s->mode |= MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_BLOCK;
+		*mode |= MODE_CURSOR_BLINKING;
 		break;
 	case 2:
-		s->cstyle = SCREEN_CURSOR_BLOCK;
-		s->mode &= ~MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_BLOCK;
+		*mode &= ~MODE_CURSOR_BLINKING;
 		break;
 	case 3:
-		s->cstyle = SCREEN_CURSOR_UNDERLINE;
-		s->mode |= MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_UNDERLINE;
+		*mode |= MODE_CURSOR_BLINKING;
 		break;
 	case 4:
-		s->cstyle = SCREEN_CURSOR_UNDERLINE;
-		s->mode &= ~MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_UNDERLINE;
+		*mode &= ~MODE_CURSOR_BLINKING;
 		break;
 	case 5:
-		s->cstyle = SCREEN_CURSOR_BAR;
-		s->mode |= MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_BAR;
+		*mode |= MODE_CURSOR_BLINKING;
 		break;
 	case 6:
-		s->cstyle = SCREEN_CURSOR_BAR;
-		s->mode &= ~MODE_BLINKING;
+		*cstyle = SCREEN_CURSOR_BAR;
+		*mode &= ~MODE_CURSOR_BLINKING;
 		break;
 	}
 }
 
 /* Set screen cursor colour. */
 void
-screen_set_cursor_colour(struct screen *s, const char *colour)
+screen_set_cursor_colour(struct screen *s, int colour)
 {
-	free(s->ccolour);
-	s->ccolour = xstrdup(colour);
+	s->ccolour = colour;
 }
 
 /* Set screen title. */
@@ -680,8 +681,10 @@ screen_mode_to_string(int mode)
 		strlcat(tmp, "MOUSE_STANDARD,", sizeof tmp);
 	if (mode & MODE_MOUSE_BUTTON)
 		strlcat(tmp, "MOUSE_BUTTON,", sizeof tmp);
-	if (mode & MODE_BLINKING)
-		strlcat(tmp, "BLINKING,", sizeof tmp);
+	if (mode & MODE_CURSOR_BLINKING)
+		strlcat(tmp, "CURSOR_BLINKING,", sizeof tmp);
+	if (mode & MODE_CURSOR_VERY_VISIBLE)
+		strlcat(tmp, "CURSOR_VERY_VISIBLE,", sizeof tmp);
 	if (mode & MODE_MOUSE_UTF8)
 		strlcat(tmp, "UTF8,", sizeof tmp);
 	if (mode & MODE_MOUSE_SGR)

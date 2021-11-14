@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.c,v 1.277 2021/06/17 16:10:39 mpi Exp $	*/
+/*	$OpenBSD: uvm_map.c,v 1.279 2021/10/24 15:23:52 mpi Exp $	*/
 /*	$NetBSD: uvm_map.c,v 1.86 2000/11/27 08:40:03 chs Exp $	*/
 
 /*
@@ -1570,9 +1570,15 @@ uvm_unmap_detach(struct uvm_map_deadq *deadq, int flags)
 	int waitok = flags & UVM_PLA_WAITOK;
 
 	TAILQ_FOREACH_SAFE(entry, deadq, dfree.deadq, tmp) {
+		/* Drop reference to amap, if we've got one. */
+		if (entry->aref.ar_amap)
+			amap_unref(entry->aref.ar_amap,
+			    entry->aref.ar_pageoff,
+			    atop(entry->end - entry->start),
+			    flags & AMAP_REFALL);
+
 		/* Skip entries for which we have to grab the kernel lock. */
-		if (entry->aref.ar_amap || UVM_ET_ISSUBMAP(entry) ||
-		    UVM_ET_ISOBJ(entry))
+		if (UVM_ET_ISSUBMAP(entry) || UVM_ET_ISOBJ(entry))
 			continue;
 
 		TAILQ_REMOVE(deadq, entry, dfree.deadq);
@@ -1586,13 +1592,6 @@ uvm_unmap_detach(struct uvm_map_deadq *deadq, int flags)
 	while ((entry = TAILQ_FIRST(deadq)) != NULL) {
 		if (waitok)
 			uvm_pause();
-		/* Drop reference to amap, if we've got one. */
-		if (entry->aref.ar_amap)
-			amap_unref(entry->aref.ar_amap,
-			    entry->aref.ar_pageoff,
-			    atop(entry->end - entry->start),
-			    flags & AMAP_REFALL);
-
 		/* Drop reference to our backing object, if we've got one. */
 		if (UVM_ET_ISSUBMAP(entry)) {
 			/* ... unlikely to happen, but play it safe */
@@ -2117,8 +2116,8 @@ uvm_unmap_kill_entry(struct vm_map *map, struct vm_map_entry *entry)
 		/* Nothing to be done for holes. */
 	} else if (map->flags & VM_MAP_INTRSAFE) {
 		KASSERT(vm_map_pmap(map) == pmap_kernel());
+
 		uvm_km_pgremove_intrsafe(entry->start, entry->end);
-		pmap_kremove(entry->start, entry->end - entry->start);
 	} else if (UVM_ET_ISOBJ(entry) &&
 	    UVM_OBJ_IS_KERN_OBJECT(entry->object.uvm_obj)) {
 		KASSERT(vm_map_pmap(map) == pmap_kernel());
@@ -2156,10 +2155,8 @@ uvm_unmap_kill_entry(struct vm_map *map, struct vm_map_entry *entry)
 		 * from the object.  offsets are always relative
 		 * to vm_map_min(kernel_map).
 		 */
-		pmap_remove(pmap_kernel(), entry->start, entry->end);
-		uvm_km_pgremove(entry->object.uvm_obj,
-		    entry->start - vm_map_min(kernel_map),
-		    entry->end - vm_map_min(kernel_map));
+		uvm_km_pgremove(entry->object.uvm_obj, entry->start,
+		    entry->end);
 
 		/*
 		 * null out kernel_object reference, we've just

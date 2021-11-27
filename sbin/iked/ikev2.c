@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2.c,v 1.330 2021/11/10 13:09:05 tobhe Exp $	*/
+/*	$OpenBSD: ikev2.c,v 1.336 2021/11/26 14:05:01 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -806,6 +806,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		    print_map(ikeauth.auth_method,
 		    ikev2_auth_map));
 		ikev2_send_auth_failed(env, sa);
+		explicit_bzero(&ikeauth, sizeof(ikeauth));
 		return (-1);
 	}
 	ikeauth.auth_method = sa->sa_peerauth.id_type;
@@ -815,6 +816,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		log_debug("%s: failed to get auth data",
 		    __func__);
 		ikev2_send_auth_failed(env, sa);
+		explicit_bzero(&ikeauth, sizeof(ikeauth));
 		return (-1);
 	}
 
@@ -827,6 +829,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		log_info("%s: ikev2_msg_authverify failed",
 		    SPI_SA(sa, __func__));
 		ikev2_send_auth_failed(env, sa);
+		explicit_bzero(&ikeauth, sizeof(ikeauth));
 		return (-1);
 	}
 	if (sa->sa_eapmsk != NULL) {
@@ -834,6 +837,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		    !sa->sa_hdr.sh_initiator)) == NULL) {
 			log_debug("%s: failed to get auth data",
 			    __func__);
+			explicit_bzero(&ikeauth, sizeof(ikeauth));
 			return (-1);
 		}
 
@@ -842,6 +846,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		ibuf_release(authmsg);
 		if (ret != 0) {
 			ikev2_send_auth_failed(env, sa);
+			explicit_bzero(&ikeauth, sizeof(ikeauth));
 			return (-1);
 		}
 
@@ -851,6 +856,7 @@ ikev2_auth_verify(struct iked *env, struct iked_sa *sa)
 		sa_state(env, sa, IKEV2_STATE_EAP_SUCCESS);
 	}
 
+	explicit_bzero(&ikeauth, sizeof(ikeauth));
 	return (0);
 }
 
@@ -1985,7 +1991,7 @@ ikev2_add_ipcompnotify(struct iked *env, struct ibuf *e,
 		csa.csa_ikesa = sa;
 		csa.csa_local = &sa->sa_peer;
 		csa.csa_peer = &sa->sa_local;
-		if (pfkey_sa_init(env->sc_pfkey, &csa, &spi) == -1)
+		if (pfkey_sa_init(env, &csa, &spi) == -1)
 			return (-1);
 		ic->ic_cpi_in = spi;
 	} else {
@@ -2484,7 +2490,7 @@ ikev2_add_proposals(struct iked *env, struct iked_sa *sa, struct ibuf *buf,
 				csa.csa_local = &sa->sa_peer;
 				csa.csa_peer = &sa->sa_local;
 
-				if (pfkey_sa_init(env->sc_pfkey, &csa, &spi) == -1)
+				if (pfkey_sa_init(env, &csa, &spi) == -1)
 					return (-1);
 			}
 
@@ -2673,7 +2679,7 @@ ikev2_resp_informational(struct iked *env, struct iked_sa *sa,
 
 	/*
 	 * Include NAT_DETECTION notification on UPDATE_SA_ADDRESSES or if
-	 * the peer did include them, too (RFC 455, 3.8).
+	 * the peer did include them, too (RFC 4555, 3.8).
 	 */
 	if (sa->sa_mobike &&
 	    (msg->msg_update_sa_addresses || msg->msg_natt_rcvd)) {
@@ -3146,12 +3152,14 @@ ikev2_handle_notifies(struct iked *env, struct iked_message *msg)
 	/* Signature hash algorithm */
 	if (msg->msg_flags & IKED_MSG_FLAGS_SIGSHA2)
 		sa->sa_sigsha2 = 1;
+
 	if (msg->msg_flags & IKED_MSG_FLAGS_USE_TRANSPORT)
 		sa->sa_use_transport_mode = 1;
 
 	if ((msg->msg_flags & IKED_MSG_FLAGS_TEMPORARY_FAILURE)
 	    && sa->sa_nexti != NULL)
 		sa->sa_tmpfail = 1;
+
 	return (0);
 }
 
@@ -4970,7 +4978,7 @@ ikev2_ike_sa_alive(struct iked *env, void *arg)
 	TAILQ_FOREACH(csa, &sa->sa_childsas, csa_entry) {
 		if (!csa->csa_loaded)
 			continue;
-		if (pfkey_sa_last_used(env->sc_pfkey, csa, &last_used) != 0)
+		if (pfkey_sa_last_used(env, csa, &last_used) != 0)
 			continue;
 		diff = (uint32_t)(gettime() - last_used);
 		log_debug("%s: %s CHILD SA spi %s last used %llu second(s) ago",
@@ -6078,7 +6086,7 @@ ikev2_childsa_negotiate(struct iked *env, struct iked_sa *sa,
 			csa->csa_local = &sa->sa_peer;
 			csa->csa_peer = &sa->sa_local;
 
-			if ((ret = pfkey_sa_init(env->sc_pfkey, csa,
+			if ((ret = pfkey_sa_init(env, csa,
 			    &spi)) != 0)
 				goto done;
 			csa->csa_allocated = 1;
@@ -6158,7 +6166,7 @@ ikev2_childsa_negotiate(struct iked *env, struct iked_sa *sa,
 				ic->ic_transform = 0;
 				ic->ic_cpi_in = ic->ic_cpi_out = 0;
 			} else {
-				if ((ret = pfkey_sa_init(env->sc_pfkey, csa2,
+				if ((ret = pfkey_sa_init(env, csa2,
 				    &spi)) != 0)
 					goto done;
 				ic->ic_cpi_in = spi;
@@ -6238,14 +6246,14 @@ ikev2_childsa_enable(struct iked *env, struct iked_sa *sa)
 			continue;
 		}
 
-		if (pfkey_sa_add(env->sc_pfkey, csa, NULL) != 0) {
+		if (pfkey_sa_add(env, csa, NULL) != 0) {
 			log_debug("%s: failed to load CHILD SA spi %s",
 			    __func__, print_spi(csa->csa_spi.spi,
 			    csa->csa_spi.spi_size));
 			return (-1);
 		}
 		if (ipcomp) {
-			if (pfkey_sa_add(env->sc_pfkey, ipcomp, csa) != 0) {
+			if (pfkey_sa_add(env, ipcomp, csa) != 0) {
 				log_debug("%s: failed to load IPCOMP spi %s",
 				    __func__, print_spi(ipcomp->csa_spi.spi,
 				    ipcomp->csa_spi.spi_size));
@@ -6311,12 +6319,12 @@ ikev2_childsa_enable(struct iked *env, struct iked_sa *sa)
 				continue;
 			}
 			RB_REMOVE(iked_flows, &env->sc_activeflows, flow);
-			(void)pfkey_flow_delete(env->sc_pfkey, flow);
+			(void)pfkey_flow_delete(env, flow);
 			flow->flow_loaded = 0; /* we did RB_REMOVE */
 			reload = 1;
 		}
 
-		if (pfkey_flow_add(env->sc_pfkey, flow) != 0) {
+		if (pfkey_flow_add(env, flow) != 0) {
 			log_debug("%s: failed to load flow", __func__);
 			return (-1);
 		}
@@ -6397,7 +6405,7 @@ ikev2_childsa_delete(struct iked *env, struct iked_sa *sa, uint8_t saproto,
 		if (csa->csa_loaded)
 			RB_REMOVE(iked_activesas, &env->sc_activesas, csa);
 
-		if (pfkey_sa_delete(env->sc_pfkey, csa) != 0)
+		if (pfkey_sa_delete(env, csa) != 0)
 			log_info("%s: failed to delete CHILD SA spi %s",
 			    SPI_SA(sa, __func__), print_spi(csa->csa_spi.spi,
 			    csa->csa_spi.spi_size));
@@ -6413,7 +6421,7 @@ ikev2_childsa_delete(struct iked *env, struct iked_sa *sa, uint8_t saproto,
 		ipcomp = csa->csa_bundled;
 		if (ipcomp) {
 			if (ipcomp->csa_loaded) {
-				if (pfkey_sa_delete(env->sc_pfkey, ipcomp) != 0)
+				if (pfkey_sa_delete(env, ipcomp) != 0)
 					log_info("%s: failed to delete IPCOMP"
 					    " SA spi %s", SPI_SA(sa, __func__),
 					    print_spi(ipcomp->csa_spi.spi,
@@ -6571,14 +6579,20 @@ ikev2_child_sa_rekey(struct iked *env, struct iked_spi *rekey)
 		return (0);
 	}
 	if (!sa_stateok(sa, IKEV2_STATE_ESTABLISHED)) {
-		log_warnx("%s: SA %s is not established", __func__,
+		log_warnx("%s: not established, SPI %s", SPI_SA(sa, __func__),
 		    print_spi(rekey->spi, rekey->spi_size));
 		return (0);
 	}
-	if (sa->sa_stateflags & (IKED_REQ_CHILDSA|IKED_REQ_INF))
+	if (sa->sa_stateflags & (IKED_REQ_CHILDSA|IKED_REQ_INF)) {
+		log_info("%s: busy, retrying, SPI %s", SPI_SA(sa, __func__),
+		    print_spi(rekey->spi, rekey->spi_size));
 		return (-1);	/* busy, retry later */
-	if (sa->sa_tmpfail)
+	}
+	if (sa->sa_tmpfail) {
+		log_info("%s: peer busy, retrying, SPI %s", SPI_SA(sa, __func__),
+		    print_spi(rekey->spi, rekey->spi_size));
 		return (-1);	/* peer is busy, retry later */
+	}
 	if (csa->csa_allocated)	/* Peer SPI died first, get the local one */
 		rekey->spi = csa->csa_peerspi;
 	if (ikev2_send_create_child_sa(env, sa, rekey, rekey->spi_protoid, 0))
@@ -7142,11 +7156,11 @@ ikev2_update_sa_addresses(struct iked *env, struct iked_sa *sa)
 	TAILQ_FOREACH(csa, &sa->sa_childsas, csa_entry) {
 		if (!csa->csa_loaded)
 			continue;
-		if (pfkey_sa_update_addresses(env->sc_pfkey, csa) != 0)
+		if (pfkey_sa_update_addresses(env, csa) != 0)
 			log_debug("%s: failed to update sa", __func__);
 		if ((ipcomp = csa->csa_bundled) != NULL &&
 		    ipcomp->csa_loaded)
-			if (pfkey_sa_update_addresses(env->sc_pfkey, ipcomp)
+			if (pfkey_sa_update_addresses(env, ipcomp)
 			     != 0)
 				log_debug("%s: failed to update sa", __func__);
 	}
@@ -7155,10 +7169,10 @@ ikev2_update_sa_addresses(struct iked *env, struct iked_sa *sa)
 	TAILQ_FOREACH(flow, &sa->sa_flows, flow_entry) {
 		if (flow->flow_loaded) {
 			RB_REMOVE(iked_flows, &env->sc_activeflows, flow);
-			(void)pfkey_flow_delete(env->sc_pfkey, flow);
+			(void)pfkey_flow_delete(env, flow);
 			flow->flow_loaded = 0;
 		}
-		if (pfkey_flow_add(env->sc_pfkey, flow) != 0)
+		if (pfkey_flow_add(env, flow) != 0)
 			log_debug("%s: failed to add flow %p", __func__, flow);
 		if (!flow->flow_loaded)
 			continue;

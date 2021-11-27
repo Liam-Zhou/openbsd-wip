@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifconfig.c,v 1.449 2021/11/11 09:39:16 claudio Exp $	*/
+/*	$OpenBSD: ifconfig.c,v 1.451 2021/11/23 19:13:45 kn Exp $	*/
 /*	$NetBSD: ifconfig.c,v 1.40 1997/10/01 02:19:43 enami Exp $	*/
 
 /*
@@ -718,6 +718,7 @@ u_int	getwpacipher(const char *);
 void	print_cipherset(u_int32_t);
 
 void	spppauthinfo(struct sauthreq *, int);
+void	spppdnsinfo(struct sdnsreq *);
 
 /* Known address families */
 const struct afswtch {
@@ -5361,12 +5362,13 @@ pppoe_status(void)
 	printf(" PADR retries: %d", state.padr_retry_no);
 
 	if (state.state == PPPOE_STATE_SESSION) {
-		struct timeval temp_time;
+		struct timespec temp_time;
 		time_t diff_time, day = 0;
 		unsigned int hour = 0, min = 0, sec = 0;
 
 		if (state.session_time.tv_sec != 0) {
-			gettimeofday(&temp_time, NULL);
+			if (clock_gettime(CLOCK_BOOTTIME, &temp_time) == -1)
+				goto notime;
 			diff_time = temp_time.tv_sec -
 			    state.session_time.tv_sec;
 
@@ -5386,6 +5388,7 @@ pppoe_status(void)
 			printf("%lldd ", (long long)day);
 		printf("%02u:%02u:%02u", hour, min, sec);
 	}
+notime:
 	putchar('\n');
 }
 
@@ -5452,6 +5455,17 @@ spppauthinfo(struct sauthreq *spa, int d)
 	spa->cmd = d == 0 ? SPPPIOGMAUTH : SPPPIOGHAUTH;
 	if (ioctl(sock, SIOCGSPPPPARAMS, &ifr) == -1)
 		err(1, "SIOCGSPPPPARAMS(SPPPIOGXAUTH)");
+}
+
+void
+spppdnsinfo(struct sdnsreq *spd)
+{
+	memset(spd, 0, sizeof(*spd));
+
+	ifr.ifr_data = (caddr_t)spd;
+	spd->cmd = SPPPIOGDNS;
+	if (ioctl(sock, SIOCGSPPPPARAMS, &ifr) == -1)
+		err(1, "SIOCGSPPPPARAMS(SPPPIOGDNS)");
 }
 
 void
@@ -5588,6 +5602,9 @@ sppp_status(void)
 {
 	struct spppreq spr;
 	struct sauthreq spa;
+	struct sdnsreq spd;
+	char astr[INET_ADDRSTRLEN];
+	int i, n;
 
 	bzero(&spr, sizeof(spr));
 
@@ -5627,6 +5644,16 @@ sppp_status(void)
 	if (spa.flags & AUTHFLAG_NORECHALLENGE)
 		printf("norechallenge ");
 	putchar('\n');
+
+	spppdnsinfo(&spd);
+	for (i = 0, n = 0; i < IPCP_MAX_DNSSRV; i++) {
+		if (spd.dns[i].s_addr == INADDR_ANY)
+			break;
+		printf("%s %s", n++ ? "" : "\tdns:",
+		    inet_ntop(AF_INET, &spd.dns[i], astr, sizeof(astr)));
+	}
+	if (n)
+		printf("\n");
 }
 
 void

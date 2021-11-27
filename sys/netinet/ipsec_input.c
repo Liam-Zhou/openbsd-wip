@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsec_input.c,v 1.191 2021/11/11 18:08:18 bluhm Exp $	*/
+/*	$OpenBSD: ipsec_input.c,v 1.193 2021/11/25 13:46:02 bluhm Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -311,8 +311,8 @@ ipsec_common_input(struct mbuf **mp, int skip, int protoff, int af, int sproto,
 	}
 
 	if (sproto != IPPROTO_IPCOMP) {
-		if ((encif = enc_getif(tdbp->tdb_rdomain_post,
-		    tdbp->tdb_tap)) == NULL) {
+		encif = enc_getif(tdbp->tdb_rdomain_post, tdbp->tdb_tap);
+		if (encif == NULL) {
 			DPRINTF("no enc%u interface for SA %s/%08x/%u",
 			    tdbp->tdb_tap,
 			    ipsp_address(&dst_address, buf, sizeof(buf)),
@@ -328,12 +328,16 @@ ipsec_common_input(struct mbuf **mp, int skip, int protoff, int af, int sproto,
 	/* Register first use, setup expiration timer. */
 	if (tdbp->tdb_first_use == 0) {
 		tdbp->tdb_first_use = gettime();
-		if (tdbp->tdb_flags & TDBF_FIRSTUSE)
-			timeout_add_sec(&tdbp->tdb_first_tmo,
-			    tdbp->tdb_exp_first_use);
-		if (tdbp->tdb_flags & TDBF_SOFT_FIRSTUSE)
-			timeout_add_sec(&tdbp->tdb_sfirst_tmo,
-			    tdbp->tdb_soft_first_use);
+		if (tdbp->tdb_flags & TDBF_FIRSTUSE) {
+			if (timeout_add_sec(&tdbp->tdb_first_tmo,
+			    tdbp->tdb_exp_first_use))
+				tdb_ref(tdbp);
+		}
+		if (tdbp->tdb_flags & TDBF_SOFT_FIRSTUSE) {
+			if (timeout_add_sec(&tdbp->tdb_sfirst_tmo,
+			    tdbp->tdb_soft_first_use))
+				tdb_ref(tdbp);
+		}
 	}
 
 	tdbp->tdb_ipackets++;
@@ -348,6 +352,7 @@ ipsec_common_input(struct mbuf **mp, int skip, int protoff, int af, int sproto,
 		ipsecstat_inc(ipsec_idrops);
 		tdbp->tdb_idrops++;
 	}
+	tdb_unref(tdbp);
 	return prot;
 
  drop:
@@ -355,6 +360,7 @@ ipsec_common_input(struct mbuf **mp, int skip, int protoff, int af, int sproto,
 	ipsecstat_inc(ipsec_idrops);
 	if (tdbp != NULL)
 		tdbp->tdb_idrops++;
+	tdb_unref(tdbp);
 	return IPPROTO_DONE;
 }
 
@@ -583,7 +589,8 @@ ipsec_common_input_cb(struct mbuf **mp, struct tdb *tdbp, int skip, int protoff)
 	tdbp->tdb_idecompbytes += m->m_pkthdr.len;
 
 #if NBPFILTER > 0
-	if ((encif = enc_getif(tdbp->tdb_rdomain_post, tdbp->tdb_tap)) != NULL) {
+	encif = enc_getif(tdbp->tdb_rdomain_post, tdbp->tdb_tap);
+	if (encif != NULL) {
 		encif->if_ipackets++;
 		encif->if_ibytes += m->m_pkthdr.len;
 
@@ -937,6 +944,7 @@ ipsec_common_ctlinput(u_int rdomain, int cmd, struct sockaddr *sa,
 		tdbp = gettdb_rev(rdomain, spi, (union sockaddr_union *)&dst,
 		    proto);
 		ipsec_set_mtu(tdbp, mtu);
+		tdb_unref(tdbp);
 	}
 }
 
@@ -944,7 +952,7 @@ void
 udpencap_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 {
 	struct ip *ip = v;
-	struct tdb *tdbp;
+	struct tdb *tdbp, *first;
 	struct icmp *icp;
 	u_int32_t mtu;
 	struct sockaddr_in dst, src;
@@ -973,10 +981,9 @@ udpencap_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 	src.sin_addr.s_addr = ip->ip_src.s_addr;
 	su_src = (union sockaddr_union *)&src;
 
-	tdbp = gettdbbysrcdst_rev(rdomain, 0, su_src, su_dst,
-	    IPPROTO_ESP);
+	first = gettdbbysrcdst_rev(rdomain, 0, su_src, su_dst, IPPROTO_ESP);
 
-	for (; tdbp != NULL; tdbp = tdbp->tdb_snext) {
+	for (tdbp = first; tdbp != NULL; tdbp = tdbp->tdb_snext) {
 		if (tdbp->tdb_sproto == IPPROTO_ESP &&
 		    ((tdbp->tdb_flags & (TDBF_INVALID|TDBF_UDPENCAP)) ==
 		    TDBF_UDPENCAP) &&
@@ -985,6 +992,7 @@ udpencap_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 			ipsec_set_mtu(tdbp, mtu);
 		}
 	}
+	tdb_unref(first);
 }
 
 void
@@ -1070,6 +1078,7 @@ ipsec_forward_check(struct mbuf *m, int hlen, int af)
 	} else
 		tdb = NULL;
 	ipsp_spd_lookup(m, af, hlen, &error, IPSP_DIRECTION_IN, tdb, NULL, 0);
+	tdb_unref(tdb);
 
 	return error;
 }
@@ -1142,6 +1151,7 @@ ipsec_local_check(struct mbuf *m, int hlen, int proto, int af)
 		tdb = NULL;
 	ipsp_spd_lookup(m, af, hlen, &error, IPSP_DIRECTION_IN,
 	    tdb, NULL, 0);
+	tdb_unref(tdb);
 
 	return error;
 }
